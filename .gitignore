@@ -1,0 +1,10 @@
+build/
+*.o
+*.so
+*.dylib
+*.duckdb_extension
+__pycache__/
+*.pyc
+python/blobtemplates/*.so
+python/blobtemplates/*.dylib
+.DS_Store
