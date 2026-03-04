@@ -132,6 +132,104 @@ blobtemplates/
 
 The core wrapper caches parsed templates in a process-wide LRU cache (capped at 1024 entries) protected by a readers-writer lock. The SQLite extension additionally uses `sqlite3_set_auxdata` / `sqlite3_get_auxdata` for per-statement caching of parsed templates and environments.
 
+## Use cases
+
+### ODBC connection strings
+
+ODBC connection strings use `{` and `}` heavily (e.g. `DRIVER={ODBC Driver 18 for SQL Server}`), which clashes with Inja's default `{{ }}` delimiters. Use `template_render_with_options` to switch to angle-bracket delimiters:
+
+```sql
+-- Store connection templates in a table
+CREATE TABLE connection_templates (
+    name     TEXT PRIMARY KEY,
+    template TEXT,
+    options  TEXT DEFAULT '{"expression": ["<<", ">>"], "statement": ["<%", "%>"], "comment": ["<#", "#>"]}'
+);
+
+INSERT INTO connection_templates (name, template) VALUES
+  ('sqlserver',
+   'DRIVER={ODBC Driver 18 for SQL Server};SERVER=<< host >>;DATABASE=<< database >>;UID=<< user >>;PWD=<< password >>;TrustServerCertificate=<< trust_cert >>'),
+  ('postgres',
+   'DRIVER={PostgreSQL Unicode};SERVER=<< host >>;PORT=<< port >>;DATABASE=<< database >>;UID=<< user >>;PWD=<< password >>');
+
+-- Render a connection string from parameters
+SELECT template_render_with_options(
+    t.template,
+    json_object(
+        'host', 'dbserver.example.com',
+        'database', 'analytics',
+        'user', 'etl_user',
+        'password', 'secret',
+        'trust_cert', 'yes'
+    ),
+    t.options
+)
+FROM connection_templates t
+WHERE t.name = 'sqlserver';
+-- DRIVER={ODBC Driver 18 for SQL Server};SERVER=dbserver.example.com;DATABASE=analytics;UID=etl_user;PWD=secret;TrustServerCertificate=yes
+```
+
+### Dialect-specific SQL generation
+
+Templates can generate SQL tailored to different database backends. This is useful when querying remote catalog tables via ODBC, where each RDBMS has its own system views and syntax:
+
+```sql
+CREATE TABLE catalog_query_templates (
+    dialect  TEXT,
+    query    TEXT,
+    template TEXT
+);
+
+INSERT INTO catalog_query_templates VALUES
+  ('sqlserver', 'list_tables',
+   'SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM [<< database >>].INFORMATION_SCHEMA.TABLES<% if schema %> WHERE TABLE_SCHEMA = ''<< schema >>''<% endif %>'),
+  ('postgres', 'list_tables',
+   'SELECT schemaname, tablename, ''BASE TABLE'' AS table_type FROM pg_catalog.pg_tables<% if schema %> WHERE schemaname = ''<< schema >>''<% endif %> UNION ALL SELECT schemaname, viewname, ''VIEW'' FROM pg_catalog.pg_views<% if schema %> WHERE schemaname = ''<< schema >>''<% endif %>'),
+  ('sqlserver', 'column_stats',
+   'SELECT c.name AS column_name, t.name AS data_type, c.max_length, c.precision, c.scale FROM [<< database >>].sys.columns c JOIN [<< database >>].sys.types t ON c.user_type_id = t.user_type_id WHERE c.object_id = OBJECT_ID(''[<< database >>].[<< schema >>].[<< table >>]'')');
+
+-- Generate a catalog query for a specific dialect and database
+SELECT template_render_with_options(
+    t.template,
+    json_object('database', 'analytics', 'schema', 'dbo', 'table', 'customers'),
+    '{"expression": ["<<", ">>"], "statement": ["<%", "%>"]}'
+)
+FROM catalog_query_templates t
+WHERE t.dialect = 'sqlserver' AND t.query = 'column_stats';
+```
+
+This pattern is particularly useful for the **blobfilters** project, which uses DuckDB's nanodbc integration to query remote databases for domain detection and profiling. Templates let you maintain a single codebase that generates the right catalog queries for each target RDBMS — avoiding scattered dialect-specific SQL strings throughout the code.
+
+### DDL code generation (rule4 patterns)
+
+The [phrrngtn/rule4](https://github.com/phrrngtn/rule4) project demonstrates a more advanced pattern: storing Inja templates in a SQLite table and using them with the sqlean [`define`](https://github.com/nickolay/sqlean-define) extension and `eval()` to generate and execute DDL at runtime.
+
+The key elements:
+
+1. **Template storage** — templates live in a `codegen_template` table, versioned and queryable like any other data.
+
+2. **Virtual table functions** — the `define` extension wraps `template_render()` calls as virtual table functions, so generated SQL can be queried directly.
+
+3. **eval() execution** — rendered templates produce DDL (CREATE TABLE, CREATE TRIGGER, etc.) that is executed via `eval()`.
+
+4. **INSTEAD OF triggers** — views over catalog tables become writable via INSTEAD OF triggers whose bodies are themselves template-generated. Inserting into a view like `extended_properties` triggers template rendering, DDL generation, and execution in a single statement.
+
+Example Inja patterns used in rule4:
+
+```
+{# Loop over columns with comma handling #}
+{% for col in columns %}{{ col }}{% if not loop.is_last %}, {% endif %}{% endfor %}
+
+{# Conditional clauses #}
+{% if has_timestamp %}CREATE TRIGGER {{ table }}_audit ...{% endif %}
+
+{# Nested template rendering for multi-stage code generation #}
+SELECT eval(template_render(template, json_object('table', NEW.table_name)))
+FROM codegen_template WHERE name = NEW.template_name;
+```
+
+This approach treats SQL DDL as a templating problem — the database schema itself becomes data-driven and programmable.
+
 ## Prior art
 
 Based on [phrrngtn/sqlite-template-inja](https://github.com/phrrngtn/sqlite-template-inja), a minimal SQLite extension for Inja. This project extends that idea with a shared C core, DuckDB and Python bindings, and a proper caching layer.
