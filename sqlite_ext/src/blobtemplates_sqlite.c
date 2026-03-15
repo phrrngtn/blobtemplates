@@ -30,6 +30,10 @@ static void free_cached_env(void *p) {
     blobtemplates_env_destroy((blobtemplates_env *)p);
 }
 
+static void free_cached_jmespath(void *p) {
+    blobtemplates_jmespath_destroy((blobtemplates_jmespath_expr *)p);
+}
+
 /* ── main scalar function ─────────────────────────────────────────── */
 
 static void inja_func(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
@@ -95,6 +99,117 @@ static void inja_func(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     }
 }
 
+/* ── jmespath_search(json, expression) ────────────────────────────── */
+
+static void jmespath_search_func(sqlite3_context *ctx, int argc,
+                                  sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    const char *json = (const char *)sqlite3_value_text(argv[0]);
+    const char *expression = (const char *)sqlite3_value_text(argv[1]);
+
+    /* Try to reuse compiled expression (arg 1) */
+    blobtemplates_jmespath_expr *expr =
+        (blobtemplates_jmespath_expr *)sqlite3_get_auxdata(ctx, 1);
+    char *result;
+
+    if (expr) {
+        result = blobtemplates_jmespath_search_compiled(expr, json);
+    } else {
+        expr = blobtemplates_jmespath_compile(expression);
+        if (!expr) {
+            sqlite3_result_error(ctx, blobtemplates_errmsg(), -1);
+            return;
+        }
+        sqlite3_set_auxdata(ctx, 1, expr, free_cached_jmespath);
+        /* Re-fetch in case auxdata was not retained */
+        expr = (blobtemplates_jmespath_expr *)sqlite3_get_auxdata(ctx, 1);
+        if (expr) {
+            result = blobtemplates_jmespath_search_compiled(expr, json);
+        } else {
+            result = blobtemplates_jmespath_search(json, expression);
+        }
+    }
+
+    if (result) {
+        sqlite3_result_text(ctx, result, -1, SQLITE_TRANSIENT);
+        blobtemplates_free(result);
+    } else {
+        const char *err = blobtemplates_errmsg();
+        if (err && err[0]) {
+            sqlite3_result_error(ctx, err, -1);
+        } else {
+            sqlite3_result_null(ctx);  /* JMESPath null result */
+        }
+    }
+}
+
+/* ── Two-arg JSON functions (source, target/expression/patch) ──────── */
+
+typedef char *(*two_arg_json_fn)(const char *, const char *);
+
+static void two_arg_func(sqlite3_context *ctx, int argc,
+                           sqlite3_value **argv) {
+    two_arg_json_fn fn = (two_arg_json_fn)sqlite3_user_data(ctx);
+
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    const char *a = (const char *)sqlite3_value_text(argv[0]);
+    const char *b = (const char *)sqlite3_value_text(argv[1]);
+
+    char *result = fn(a, b);
+    if (result) {
+        sqlite3_result_text(ctx, result, -1, SQLITE_TRANSIENT);
+        blobtemplates_free(result);
+    } else {
+        const char *err = blobtemplates_errmsg();
+        if (err && err[0]) {
+            sqlite3_result_error(ctx, err, -1);
+        } else {
+            sqlite3_result_null(ctx);
+        }
+    }
+}
+
+/* ── Single-arg JSON functions (flatten, unflatten) ────────────────── */
+
+typedef char *(*one_arg_json_fn)(const char *);
+
+static void one_arg_func(sqlite3_context *ctx, int argc,
+                           sqlite3_value **argv) {
+    one_arg_json_fn fn = (one_arg_json_fn)sqlite3_user_data(ctx);
+
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    const char *a = (const char *)sqlite3_value_text(argv[0]);
+
+    char *result = fn(a);
+    if (result) {
+        sqlite3_result_text(ctx, result, -1, SQLITE_TRANSIENT);
+        blobtemplates_free(result);
+    } else {
+        const char *err = blobtemplates_errmsg();
+        if (err && err[0]) {
+            sqlite3_result_error(ctx, err, -1);
+        } else {
+            sqlite3_result_null(ctx);
+        }
+    }
+}
+
+/* ── Extension init ──────────────────────────────────────────────── */
+
 #ifdef _WIN32
 __declspec(dllexport)
 #endif
@@ -111,5 +226,57 @@ int sqlite3_blobtemplates_init(sqlite3 *db, char **pzErrMsg,
     rc = sqlite3_create_function(db, "template_render", 3,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, inja_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* JMESPath */
+    rc = sqlite3_create_function(db, "jmespath_search", 2,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  NULL, jmespath_search_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* JSON diff/patch (jsoncons) */
+    rc = sqlite3_create_function(db, "json_from_diff", 2,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_from_diff,
+                                  two_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function(db, "json_apply_patch", 2,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_apply_patch,
+                                  two_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* JSON diff/patch (nlohmann) */
+    rc = sqlite3_create_function(db, "json_diff", 2,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_diff,
+                                  two_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function(db, "json_patch", 2,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_patch,
+                                  two_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* JSON flatten/unflatten */
+    rc = sqlite3_create_function(db, "json_flatten", 1,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_flatten,
+                                  one_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function(db, "json_unflatten", 1,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_unflatten,
+                                  one_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* YAML → JSON */
+    rc = sqlite3_create_function(db, "yaml_to_json", 1,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_yaml_to_json,
+                                  one_arg_func, NULL, NULL);
     return rc;
 }

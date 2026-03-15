@@ -2,6 +2,11 @@
 
 #include <inja/inja.hpp>
 #include <nlohmann/json.hpp>
+#include <jsoncons/json.hpp>
+#include <jsoncons_ext/jmespath/jmespath.hpp>
+#include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
+#include <ryml.hpp>
+#include <ryml_std.hpp>
 
 #include <cstring>
 #include <functional>
@@ -290,6 +295,421 @@ char *blobtemplates_render_cached(blobtemplates_env *env,
         return nullptr;
     } catch (const nlohmann::json::exception &ex) {
         g_errmsg = ex.what();
+        return nullptr;
+    }
+}
+
+/* ── Custom JMESPath functions ─────────────────────────────────
+ *
+ * Registered into every JMESPath evaluation so they're available
+ * from DuckDB, SQLite, and Python without any per-call setup.
+ *
+ *   zip_arrays(obj)   — {a:[1,2], b:[3,4]} → [{a:1,b:3}, {a:2,b:4}]
+ *   to_entries(obj)    — {k1:v1, k2:v2}     → [{key:k1,value:v1}, ...]
+ *
+ * Thread-safe: the custom_functions instance is stateless and
+ * constructed per-call (cheap — just a vector of function pointers).
+ */
+
+using JsonT = jsoncons::json;
+using JmesParam = jsoncons::jmespath::parameter<JsonT>;
+using JmesCtx = jsoncons::jmespath::eval_context<JsonT>;
+
+class blob_jmespath_functions
+    : public jsoncons::jmespath::custom_functions<JsonT> {
+public:
+    blob_jmespath_functions() {
+        /* zip_arrays(obj) → array of objects
+         *
+         * Takes an object whose values are all arrays of the same length.
+         * Transposes from columnar to row-oriented:
+         *   {time:["a","b"], temp:[1,2]} → [{time:"a",temp:1}, {time:"b",temp:2}]
+         *
+         * Designed for APIs that return parallel arrays (Open-Meteo, charting
+         * endpoints, etc.) to normalize them to the same shape as APIs that
+         * return array-of-objects.
+         */
+        this->register_function("zip_arrays", 1,
+            [](jsoncons::span<const JmesParam> params,
+               JmesCtx &context, std::error_code &ec) -> JsonT
+            {
+                if (!params[0].is_value() || !params[0].value().is_object()) {
+                    ec = jsoncons::jmespath::jmespath_errc::invalid_argument;
+                    return context.null_value();
+                }
+                const auto &obj = params[0].value();
+
+                /* Find the array length (all must match) */
+                std::size_t len = 0;
+                bool first = true;
+                for (const auto &member : obj.object_range()) {
+                    if (!member.value().is_array()) {
+                        ec = jsoncons::jmespath::jmespath_errc::invalid_argument;
+                        return context.null_value();
+                    }
+                    std::size_t n = member.value().size();
+                    if (first) { len = n; first = false; }
+                    else if (n != len) {
+                        /* Arrays not same length — use shortest */
+                        if (n < len) len = n;
+                    }
+                }
+
+                JsonT result = JsonT(jsoncons::json_array_arg);
+                for (std::size_t i = 0; i < len; ++i) {
+                    JsonT row = JsonT(jsoncons::json_object_arg);
+                    for (const auto &member : obj.object_range()) {
+                        row.insert_or_assign(member.key(), member.value().at(i));
+                    }
+                    result.push_back(std::move(row));
+                }
+                return result;
+            }
+        );
+
+        /* unzip_arrays(arr) → {k1: [...], k2: [...]}
+         *
+         * Inverse of zip_arrays. Takes an array of objects and transposes
+         * to an object of parallel arrays (columnar layout):
+         *   [{a:1, b:"x"}, {a:2, b:"y"}] → {a:[1,2], b:["x","y"]}
+         *
+         * Keys are taken from the first element. Missing keys in
+         * subsequent elements produce null values in the output arrays.
+         */
+        this->register_function("unzip_arrays", 1,
+            [](jsoncons::span<const JmesParam> params,
+               JmesCtx &context, std::error_code &ec) -> JsonT
+            {
+                if (!params[0].is_value() || !params[0].value().is_array()) {
+                    ec = jsoncons::jmespath::jmespath_errc::invalid_argument;
+                    return context.null_value();
+                }
+                const auto &arr = params[0].value();
+                if (arr.size() == 0) {
+                    return JsonT(jsoncons::json_object_arg);
+                }
+
+                /* Collect all keys from the first element */
+                if (!arr[0].is_object()) {
+                    ec = jsoncons::jmespath::jmespath_errc::invalid_argument;
+                    return context.null_value();
+                }
+
+                std::vector<std::string> keys;
+                for (const auto &member : arr[0].object_range()) {
+                    keys.push_back(std::string(member.key()));
+                }
+
+                /* Build parallel arrays */
+                JsonT result(jsoncons::json_object_arg);
+                for (const auto &key : keys) {
+                    JsonT col(jsoncons::json_array_arg);
+                    for (std::size_t i = 0; i < arr.size(); ++i) {
+                        if (arr[i].is_object() && arr[i].contains(key)) {
+                            col.push_back(arr[i].at(key));
+                        } else {
+                            col.push_back(JsonT::null());
+                        }
+                    }
+                    result.insert_or_assign(key, std::move(col));
+                }
+                return result;
+            }
+        );
+
+        /* to_entries(obj) → [{key: k, value: v}, ...]
+         *
+         * Converts an object to an array of key-value pair objects.
+         * Useful for iterating over response objects with dynamic keys
+         * (e.g., ID-keyed maps common in API responses).
+         */
+        this->register_function("to_entries", 1,
+            [](jsoncons::span<const JmesParam> params,
+               JmesCtx &context, std::error_code &ec) -> JsonT
+            {
+                if (!params[0].is_value() || !params[0].value().is_object()) {
+                    ec = jsoncons::jmespath::jmespath_errc::invalid_argument;
+                    return context.null_value();
+                }
+                const auto &obj = params[0].value();
+
+                JsonT result = JsonT(jsoncons::json_array_arg);
+                for (const auto &member : obj.object_range()) {
+                    JsonT entry = JsonT(jsoncons::json_object_arg);
+                    entry.insert_or_assign("key", JsonT(member.key()));
+                    entry.insert_or_assign("value", member.value());
+                    result.push_back(std::move(entry));
+                }
+                return result;
+            }
+        );
+
+        /* from_entries(arr) → {k1: v1, k2: v2, ...}
+         *
+         * Inverse of to_entries. Takes an array of {key, value} objects
+         * and reconstructs an object:
+         *   [{key:"a", value:1}, {key:"b", value:2}] → {a:1, b:2}
+         *
+         * Elements missing "key" or "value" fields are skipped.
+         */
+        this->register_function("from_entries", 1,
+            [](jsoncons::span<const JmesParam> params,
+               JmesCtx &context, std::error_code &ec) -> JsonT
+            {
+                if (!params[0].is_value() || !params[0].value().is_array()) {
+                    ec = jsoncons::jmespath::jmespath_errc::invalid_argument;
+                    return context.null_value();
+                }
+                const auto &arr = params[0].value();
+
+                JsonT result(jsoncons::json_object_arg);
+                for (std::size_t i = 0; i < arr.size(); ++i) {
+                    if (!arr[i].is_object()) continue;
+                    if (!arr[i].contains("key") || !arr[i].contains("value")) continue;
+
+                    auto &key_val = arr[i].at("key");
+                    std::string key;
+                    if (key_val.is_string()) {
+                        key = key_val.template as<std::string>();
+                    } else {
+                        /* Coerce non-string keys to their JSON representation */
+                        key_val.dump(key);
+                    }
+                    result.insert_or_assign(key, arr[i].at("value"));
+                }
+                return result;
+            }
+        );
+    }
+};
+
+/* Singleton accessor — cheap to construct (just function pointers),
+   but avoid doing it on every call. */
+static const blob_jmespath_functions &get_custom_functions() {
+    static const blob_jmespath_functions instance;
+    return instance;
+}
+
+/* ── JSON processing functions ─────────────────────────────────── */
+
+char *blobtemplates_jmespath_search(const char *json, const char *expression) {
+    try {
+        g_errmsg.clear();
+        auto doc = jsoncons::json::parse(json);
+        /* Use make_expression so custom functions are available */
+        auto expr = jsoncons::jmespath::make_expression<jsoncons::json>(
+            expression, get_custom_functions());
+        auto result = expr.evaluate(doc);
+        if (result.is_null()) {
+            return nullptr;  /* g_errmsg is empty → null result, not error */
+        }
+        std::string s;
+        result.dump(s);
+        return strdup_result(s);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+/* ── Compiled JMESPath expression ─────────────────────────────── */
+
+struct blobtemplates_jmespath_expr {
+    jsoncons::jmespath::jmespath_expression<jsoncons::json> expr;
+    blobtemplates_jmespath_expr(
+        jsoncons::jmespath::jmespath_expression<jsoncons::json> e)
+        : expr(std::move(e)) {}
+};
+
+blobtemplates_jmespath_expr *blobtemplates_jmespath_compile(const char *expression) {
+    try {
+        g_errmsg.clear();
+        /* Custom functions baked into the compiled expression */
+        auto expr = jsoncons::jmespath::make_expression<jsoncons::json>(
+            expression, get_custom_functions());
+        return new blobtemplates_jmespath_expr(std::move(expr));
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+char *blobtemplates_jmespath_search_compiled(blobtemplates_jmespath_expr *expr,
+                                              const char *json) {
+    try {
+        g_errmsg.clear();
+        auto doc = jsoncons::json::parse(json);
+        auto result = expr->expr.evaluate(doc);
+        if (result.is_null()) {
+            return nullptr;
+        }
+        std::string s;
+        result.dump(s);
+        return strdup_result(s);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+void blobtemplates_jmespath_destroy(blobtemplates_jmespath_expr *expr) {
+    delete expr;
+}
+
+/* ── JSON diff/patch (jsoncons) ───────────────────────────────── */
+
+char *blobtemplates_json_from_diff(const char *source, const char *target) {
+    try {
+        g_errmsg.clear();
+        auto src = jsoncons::json::parse(source ? source : "null");
+        auto tgt = jsoncons::json::parse(target ? target : "null");
+        auto patch = jsoncons::jsonpatch::from_diff(src, tgt);
+        std::string s;
+        patch.dump(s);
+        return strdup_result(s);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+char *blobtemplates_json_apply_patch(const char *json, const char *patch) {
+    try {
+        g_errmsg.clear();
+        auto doc = jsoncons::json::parse(json ? json : "null");
+        auto p = jsoncons::json::parse(patch ? patch : "[]");
+        jsoncons::jsonpatch::apply_patch(doc, p);
+        std::string s;
+        doc.dump(s);
+        return strdup_result(s);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+/* ── JSON diff/patch (nlohmann) ───────────────────────────────── */
+
+char *blobtemplates_json_diff(const char *source, const char *target) {
+    try {
+        g_errmsg.clear();
+        auto src = nlohmann::json::parse(source ? source : "null");
+        auto tgt = nlohmann::json::parse(target ? target : "null");
+        auto patch = nlohmann::json::diff(src, tgt);
+        return strdup_result(patch.dump());
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+char *blobtemplates_json_patch(const char *source, const char *patch) {
+    try {
+        g_errmsg.clear();
+        auto src = nlohmann::json::parse(source ? source : "null");
+        auto p = nlohmann::json::parse(patch ? patch : "[]");
+        auto result = src.patch(p);
+        return strdup_result(result.dump());
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+/* ── JSON flatten/unflatten (nlohmann) ────────────────────────── */
+
+char *blobtemplates_json_flatten(const char *json) {
+    try {
+        g_errmsg.clear();
+        auto doc = nlohmann::json::parse(json);
+        return strdup_result(doc.flatten().dump());
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+char *blobtemplates_json_unflatten(const char *json) {
+    try {
+        g_errmsg.clear();
+        auto doc = nlohmann::json::parse(json);
+        return strdup_result(doc.unflatten().dump());
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+/* ── YAML → JSON (rapidyaml) ──────────────────────────────────── */
+
+/*
+ * Escape JSON control characters that ryml's emitter passes through
+ * literally. JSON requires all U+0000..U+001F to be escaped as \uXXXX
+ * (except \n, \r, \t, \b, \f which have short forms but should also be
+ * escaped when they appear raw).
+ *
+ * We scan the emitted JSON and only fix characters inside string values
+ * (between unescaped quotes) to avoid breaking JSON structure.
+ */
+static std::string escape_json_control_chars(const std::string &json) {
+    std::string out;
+    out.reserve(json.size() + json.size() / 64);  /* small margin */
+    bool in_string = false;
+    bool escaped = false;
+
+    for (size_t i = 0; i < json.size(); ++i) {
+        unsigned char ch = static_cast<unsigned char>(json[i]);
+
+        if (escaped) {
+            out.push_back(ch);
+            escaped = false;
+            continue;
+        }
+
+        if (ch == '\\' && in_string) {
+            out.push_back(ch);
+            escaped = true;
+            continue;
+        }
+
+        if (ch == '"') {
+            in_string = !in_string;
+            out.push_back(ch);
+            continue;
+        }
+
+        if (in_string && ch < 0x20) {
+            /* Escape control character as \uXXXX */
+            char buf[8];
+            snprintf(buf, sizeof(buf), "\\u%04x", ch);
+            out.append(buf);
+            continue;
+        }
+
+        out.push_back(ch);
+    }
+    return out;
+}
+
+char *blobtemplates_yaml_to_json(const char *yaml_str) {
+    return blobtemplates_yaml_to_json_n(yaml_str, strlen(yaml_str));
+}
+
+char *blobtemplates_yaml_to_json_n(const char *yaml_str, size_t yaml_len) {
+    try {
+        g_errmsg.clear();
+        /* parse_in_arena copies the input into a tree-owned arena,
+           so the input buffer has no lifetime requirements and the
+           tree is fully self-contained — no shared mutable state. */
+        ryml::Tree tree = ryml::parse_in_arena(
+            ryml::csubstr(yaml_str, yaml_len));
+        std::string json = ryml::emitrs_json<std::string>(tree);
+        /* ryml doesn't escape control chars in string values;
+           JSON requires U+0000..U+001F to be escaped. */
+        std::string safe = escape_json_control_chars(json);
+        return strdup_result(safe);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
         return nullptr;
     }
 }

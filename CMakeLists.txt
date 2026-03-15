@@ -21,12 +21,24 @@ FetchContent_Declare(nlohmann_json
   URL "https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz"
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 
-FetchContent_MakeAvailable(nlohmann_json inja)
+# ── jsoncons (header-only: JMESPath, JSON Patch, JSON Schema) ────
+FetchContent_Declare(jsoncons
+  GIT_REPOSITORY https://github.com/danielaparker/jsoncons.git
+  GIT_TAG        v1.1.0
+  GIT_SHALLOW    TRUE)
+
+# ── rapidyaml (fast YAML parser with JSON emission) ─────────────
+FetchContent_Declare(ryml
+  GIT_REPOSITORY https://github.com/biojppm/rapidyaml.git
+  GIT_TAG        v0.11.0
+  GIT_SHALLOW    FALSE)   # required for c4core submodule checkout
+
+FetchContent_MakeAvailable(nlohmann_json inja jsoncons ryml)
 
 # ── Core sources (compiled into each target) ──────────────────────
 set(BT_SOURCES src/blobtemplates_core.cpp)
 set(BT_INCLUDES include)
-set(BT_LIBS pantor::inja nlohmann_json::nlohmann_json)
+set(BT_LIBS pantor::inja nlohmann_json::nlohmann_json jsoncons ryml::ryml)
 
 # ── C example ─────────────────────────────────────────────────────
 add_executable(blobtemplates_example example/main.c ${BT_SOURCES})

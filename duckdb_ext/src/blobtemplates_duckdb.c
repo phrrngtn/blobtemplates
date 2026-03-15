@@ -4,6 +4,7 @@
  * Registers:
  *   template_render(template VARCHAR, json_data VARCHAR) -> VARCHAR
  *   template_render_with_options(template VARCHAR, json_data VARCHAR, options VARCHAR) -> VARCHAR
+ *   yaml_to_json(yaml_str VARCHAR) -> VARCHAR
  *
  * Uses the simple C extension mechanism (DUCKDB_EXTENSION_ENTRYPOINT).
  */
@@ -13,6 +14,7 @@
 
 #include "blobtemplates.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 DUCKDB_EXTENSION_EXTERN
@@ -111,6 +113,167 @@ static void template_render_opts_func(duckdb_function_info info,
     }
 }
 
+/* ── Generic 2-arg VARCHAR function (for json_diff, json_patch, etc.) */
+
+typedef char *(*two_arg_cfn)(const char *, const char *);
+
+static void two_arg_varchar_func(duckdb_function_info info,
+                                  duckdb_data_chunk input,
+                                  duckdb_vector output) {
+    two_arg_cfn fn = (two_arg_cfn)duckdb_scalar_function_get_extra_info(info);
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+
+    for (idx_t row = 0; row < size; row++) {
+        if ((val0 && !duckdb_validity_row_is_valid(val0, row)) ||
+            (val1 && !duckdb_validity_row_is_valid(val1, row))) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+
+        uint32_t len0, len1;
+        const char *s0 = str_ptr(&data0[row], &len0);
+        const char *s1 = str_ptr(&data1[row], &len1);
+
+        /* Core API needs null-terminated strings; DuckDB strings may not be */
+        char *z0 = (char *)malloc(len0 + 1);
+        char *z1 = (char *)malloc(len1 + 1);
+        memcpy(z0, s0, len0); z0[len0] = '\0';
+        memcpy(z1, s1, len1); z1[len1] = '\0';
+
+        char *result = fn(z0, z1);
+        free(z0);
+        free(z1);
+
+        if (result) {
+            duckdb_vector_assign_string_element(output, row, result);
+            blobtemplates_free(result);
+        } else {
+            const char *err = blobtemplates_errmsg();
+            if (err && err[0]) {
+                duckdb_scalar_function_set_error(info, err);
+                return;
+            }
+            /* NULL result (e.g. JMESPath null) */
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+        }
+    }
+}
+
+/* ── Generic 1-arg VARCHAR function (flatten, unflatten) ──────────── */
+
+typedef char *(*one_arg_cfn)(const char *);
+
+static void one_arg_varchar_func(duckdb_function_info info,
+                                  duckdb_data_chunk input,
+                                  duckdb_vector output) {
+    one_arg_cfn fn = (one_arg_cfn)duckdb_scalar_function_get_extra_info(info);
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+
+    for (idx_t row = 0; row < size; row++) {
+        if (val0 && !duckdb_validity_row_is_valid(val0, row)) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+
+        uint32_t len0;
+        const char *s0 = str_ptr(&data0[row], &len0);
+
+        char *z0 = (char *)malloc(len0 + 1);
+        memcpy(z0, s0, len0); z0[len0] = '\0';
+
+        char *result = fn(z0);
+        free(z0);
+
+        if (result) {
+            duckdb_vector_assign_string_element(output, row, result);
+            blobtemplates_free(result);
+        } else {
+            const char *err = blobtemplates_errmsg();
+            if (err && err[0]) {
+                duckdb_scalar_function_set_error(info, err);
+                return;
+            }
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+        }
+    }
+}
+
+/* ── Helper: register a 2-arg VARCHAR→VARCHAR function ────────────── */
+
+static void register_two_arg(duckdb_connection conn, const char *name,
+                               two_arg_cfn fn, duckdb_logical_type varchar_type) {
+    duckdb_scalar_function func = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(func, name);
+    duckdb_scalar_function_add_parameter(func, varchar_type);
+    duckdb_scalar_function_add_parameter(func, varchar_type);
+    duckdb_scalar_function_set_return_type(func, varchar_type);
+    duckdb_scalar_function_set_extra_info(func, (void *)fn, NULL);
+    duckdb_scalar_function_set_function(func, two_arg_varchar_func);
+    duckdb_register_scalar_function(conn, func);
+    duckdb_destroy_scalar_function(&func);
+}
+
+/* ── Helper: register a 1-arg VARCHAR→VARCHAR function ────────────── */
+
+static void register_one_arg(duckdb_connection conn, const char *name,
+                               one_arg_cfn fn, duckdb_logical_type varchar_type) {
+    duckdb_scalar_function func = duckdb_create_scalar_function();
+    duckdb_scalar_function_set_name(func, name);
+    duckdb_scalar_function_add_parameter(func, varchar_type);
+    duckdb_scalar_function_set_return_type(func, varchar_type);
+    duckdb_scalar_function_set_extra_info(func, (void *)fn, NULL);
+    duckdb_scalar_function_set_function(func, one_arg_varchar_func);
+    duckdb_register_scalar_function(conn, func);
+    duckdb_destroy_scalar_function(&func);
+}
+
+/* ── yaml_to_json: uses length-based API, avoids null-term copy ──── */
+
+static void yaml_to_json_func(duckdb_function_info info,
+                                duckdb_data_chunk input,
+                                duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+
+    for (idx_t row = 0; row < size; row++) {
+        if (val0 && !duckdb_validity_row_is_valid(val0, row)) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+
+        uint32_t len0;
+        const char *s0 = str_ptr(&data0[row], &len0);
+
+        char *result = blobtemplates_yaml_to_json_n(s0, len0);
+        if (result) {
+            duckdb_vector_assign_string_element(output, row, result);
+            blobtemplates_free(result);
+        } else {
+            duckdb_scalar_function_set_error(info, blobtemplates_errmsg());
+            return;
+        }
+    }
+}
+
 /* ── Helper: register scalar functions ───────────────────────────── */
 
 static void register_functions(duckdb_connection connection) {
@@ -137,6 +300,39 @@ static void register_functions(duckdb_connection connection) {
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_set_return_type(func, varchar_type);
         duckdb_scalar_function_set_function(func, template_render_opts_func);
+        duckdb_register_scalar_function(connection, func);
+        duckdb_destroy_scalar_function(&func);
+    }
+
+    /* JMESPath */
+    register_two_arg(connection, "jmespath_search",
+                     blobtemplates_jmespath_search, varchar_type);
+
+    /* JSON diff/patch (jsoncons) */
+    register_two_arg(connection, "json_from_diff",
+                     blobtemplates_json_from_diff, varchar_type);
+    register_two_arg(connection, "json_apply_patch",
+                     blobtemplates_json_apply_patch, varchar_type);
+
+    /* JSON diff/patch (nlohmann) */
+    register_two_arg(connection, "json_diff",
+                     blobtemplates_json_diff, varchar_type);
+    register_two_arg(connection, "json_patch",
+                     blobtemplates_json_patch, varchar_type);
+
+    /* JSON flatten/unflatten */
+    register_one_arg(connection, "json_flatten",
+                     blobtemplates_json_flatten, varchar_type);
+    register_one_arg(connection, "json_unflatten",
+                     blobtemplates_json_unflatten, varchar_type);
+
+    /* YAML → JSON (uses length-based API, no null-termination copy) */
+    {
+        duckdb_scalar_function func = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(func, "yaml_to_json");
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_set_return_type(func, varchar_type);
+        duckdb_scalar_function_set_function(func, yaml_to_json_func);
         duckdb_register_scalar_function(connection, func);
         duckdb_destroy_scalar_function(&func);
     }

@@ -89,6 +89,88 @@ const char *blobtemplates_errmsg(void);
  */
 void blobtemplates_cache_clear(void);
 
+/* ── JSON processing functions (via jsoncons + nlohmann) ────────── */
+
+/*
+ * JMESPath query: search a JSON document with a JMESPath expression.
+ * Returns a malloc'd JSON string (caller must free with blobtemplates_free).
+ * Returns NULL if the expression evaluates to JSON null, or on error.
+ * Call blobtemplates_errmsg() to distinguish: empty string = null result,
+ * non-empty = error.
+ */
+char *blobtemplates_jmespath_search(const char *json, const char *expression);
+
+/*
+ * Compiled JMESPath expression for repeated use.
+ * Compile once, search many documents — avoids re-parsing the expression.
+ */
+typedef struct blobtemplates_jmespath_expr blobtemplates_jmespath_expr;
+
+blobtemplates_jmespath_expr *blobtemplates_jmespath_compile(const char *expression);
+char *blobtemplates_jmespath_search_compiled(blobtemplates_jmespath_expr *expr,
+                                              const char *json);
+void blobtemplates_jmespath_destroy(blobtemplates_jmespath_expr *expr);
+
+/*
+ * JSON diff — compute a JSON Patch (RFC 6902) from source to target.
+ * Uses jsoncons::jsonpatch::from_diff.
+ * Returns a malloc'd JSON Patch array (caller must free with blobtemplates_free).
+ */
+char *blobtemplates_json_from_diff(const char *source, const char *target);
+
+/*
+ * JSON Patch (RFC 6902) — apply a patch to a document.
+ * Uses jsoncons::jsonpatch::apply_patch.
+ * Returns a malloc'd JSON string (caller must free with blobtemplates_free).
+ */
+char *blobtemplates_json_apply_patch(const char *json, const char *patch);
+
+/*
+ * JSON diff using nlohmann::json::diff (RFC 6902).
+ * Returns a malloc'd JSON Patch array (caller must free with blobtemplates_free).
+ */
+char *blobtemplates_json_diff(const char *source, const char *target);
+
+/*
+ * JSON Patch using nlohmann::json::patch (RFC 6902).
+ * Returns a malloc'd JSON string (caller must free with blobtemplates_free).
+ */
+char *blobtemplates_json_patch(const char *source, const char *patch);
+
+/*
+ * JSON flatten — convert nested JSON to flat object with JSON Pointer keys.
+ * {"a": {"b": 1}} → {"/a/b": 1}
+ */
+char *blobtemplates_json_flatten(const char *json);
+
+/*
+ * JSON unflatten — reverse of flatten.
+ * {"/a/b": 1} → {"a": {"b": 1}}
+ */
+char *blobtemplates_json_unflatten(const char *json);
+
+/* ── YAML processing (via rapidyaml) ─────────────────────────────── */
+
+/*
+ * Convert a YAML string to a JSON string.
+ *
+ * Uses rapidyaml (ryml) for parsing — 10-70x faster than yaml-cpp.
+ * Thread-safe: each call parses into its own arena with no shared
+ * mutable state, so DuckDB can call this from multiple threads
+ * concurrently with full parallelism.
+ *
+ * Returns a malloc'd JSON string on success (caller must free with
+ * blobtemplates_free).
+ * Returns NULL on error; call blobtemplates_errmsg() for details.
+ */
+char *blobtemplates_yaml_to_json(const char *yaml_str);
+
+/*
+ * Length-based variant — does not require a null-terminated string.
+ * Useful for DuckDB vector string data.
+ */
+char *blobtemplates_yaml_to_json_n(const char *yaml_str, size_t yaml_len);
+
 #ifdef __cplusplus
 }
 #endif
