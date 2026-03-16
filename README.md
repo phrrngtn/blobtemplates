@@ -1,56 +1,100 @@
 # blobtemplates
 
-C/C++ wrapper around the [Inja](https://github.com/pantor/inja) templating library (Jinja2-like syntax), with bindings for SQLite, DuckDB, and Python.
+C/C++ library exposing Inja templating, JMESPath queries, JSON diff/patch, JSON reshaping, text diffing, and YAML conversion as scalar SQL functions for SQLite and DuckDB, with Python bindings.
 
 > **Note:** This code is almost entirely AI-authored (Claude, Anthropic), albeit under close human supervision, and is for research and experimentation purposes. Successful experiments may be re-implemented in a more coordinated and curated manner.
 
 ## What it does
 
-Exposes Inja template rendering as a simple C API, then builds on that to provide:
+A shared C core (`src/blobtemplates_core.cpp`) implements all functionality, with thin wrappers for each target:
 
-- **SQLite extension** — `template_render()` scalar function
-- **DuckDB extension** — `template_render()` and `template_render_with_options()` scalar functions
-- **Python module** — `blobtemplates.render()` and `blobtemplates.render_with_options()`
-- **C example** — standalone demo program
+- **SQLite extension** -- loadable extension registering all `bt_*` scalar functions
+- **DuckDB extension** -- C API extension registering all `bt_*` scalar functions
+- **Python module** -- `blobtemplates.render()` and `blobtemplates.render_with_options()`
+- **C example** -- standalone demo program
 
-All targets link against the same core C wrapper (`src/blobtemplates_core.cpp`), which handles template parsing, caching, and rendering.
+## Function reference
 
-## Functions
+All SQL functions use the `bt_` prefix. Both the SQLite and DuckDB extensions register the same set of functions.
 
-### `template_render(template, json_data)`
+### Templating
 
-Renders an Inja/Jinja2-style template string against a JSON object.
+| Function | Description |
+|----------|-------------|
+| `bt_render(template, json)` | Render an Inja/Jinja2-style template against a JSON object |
+| `bt_render(template, json, options)` | Same, with a JSON options argument to override delimiters |
 
-```sql
-SELECT template_render('Hello {{ name }}!', '{"name": "World"}');
--- Hello World!
-```
+The options JSON supports these keys:
 
-### `template_render_with_options(template, json_data, options)`
+| Key | Default | Description |
+|-----|---------|-------------|
+| `expression` | `["{{", "}}"]` | Expression delimiters |
+| `statement` | `["{%", "%}"]` | Statement delimiters |
+| `comment` | `["{#", "#}"]` | Comment delimiters |
+| `line_statement` | `"##"` | Line statement prefix |
 
-Same as above, with a third JSON argument to override delimiters. Useful when the default `{{ }}` clashes with your data (e.g. ODBC connection strings).
+### JMESPath
 
-```sql
-SELECT template_render_with_options(
-  'Server=<< host >>;Port=<< port >>',
-  '{"host": "localhost", "port": 5432}',
-  '{"expression": ["<<", ">>"]}'
-);
--- Server=localhost;Port=5432
-```
+| Function | Description |
+|----------|-------------|
+| `bt_jmespath(json, expression)` | Evaluate a JMESPath expression against a JSON document |
 
-Supported option keys:
+Custom JMESPath functions available within expressions:
 
-| Key              | Default        | Description                    |
-|------------------|----------------|--------------------------------|
-| `expression`     | `["{{", "}}"]` | Expression delimiters          |
-| `statement`      | `["{%", "%}"]` | Statement delimiters           |
-| `comment`        | `["{#", "#}"]` | Comment delimiters             |
-| `line_statement` | `"##"`         | Line statement prefix          |
+| Custom function | Description |
+|-----------------|-------------|
+| `zip_arrays` | Combine parallel arrays into an array of tuples |
+| `unzip_arrays` | Inverse of `zip_arrays` |
+| `to_entries` | Convert an object to an array of `{"key":..., "value":...}` pairs |
+| `from_entries` | Convert an array of key/value pairs back to an object |
+
+### JSON diff and patch
+
+Two independent implementations are provided: one using jsoncons and one using nlohmann/json.
+
+| Function | Library | Description |
+|----------|---------|-------------|
+| `bt_json_from_diff(source, target)` | jsoncons | Compute a JSON Merge Patch from source to target |
+| `bt_json_apply_patch(document, patch)` | jsoncons | Apply a JSON Merge Patch to a document |
+| `bt_json_diff(source, target)` | nlohmann | Compute a JSON Patch (RFC 6902) from source to target |
+| `bt_json_patch(document, patch)` | nlohmann | Apply a JSON Patch (RFC 6902) to a document |
+
+### JSON reshaping
+
+| Function | Description |
+|----------|-------------|
+| `bt_json_flatten(json)` | Flatten a nested JSON object to a single-level object with JSON Pointer keys |
+| `bt_json_unflatten(json)` | Reverse of `bt_json_flatten` |
+| `bt_json_nest(json, spec)` | Restructure a flat JSON object into a nested shape according to a spec |
+
+### Text diff
+
+| Function | Description |
+|----------|-------------|
+| `bt_text_diff(old_text, new_text)` | Produce a unified diff between two text strings |
+| `bt_text_diff(old_text, new_text, label_old, label_new)` | Same, with custom labels for the file headers |
+
+### YAML
+
+| Function | Description |
+|----------|-------------|
+| `bt_yaml_to_json(yaml)` | Convert a YAML string to JSON |
+
+## Dependencies
+
+All fetched automatically via CMake FetchContent:
+
+| Library | Version | Purpose |
+|---------|---------|---------|
+| [Inja](https://github.com/pantor/inja) | v3.4.0 | Jinja2-style template engine |
+| [nlohmann/json](https://github.com/nlohmann/json) | v3.11.3 | JSON parsing, RFC 6902 diff/patch |
+| [jsoncons](https://github.com/danielaparker/jsoncons) | v1.1.0 | JMESPath, JSON Merge Patch, flatten/unflatten |
+| [dtl](https://github.com/cubicdaiya/dtl) | v1.21 | Diff template library for unified text diffs |
+| [rapidyaml](https://github.com/biojppm/rapidyaml) | v0.11.0 | YAML parsing |
 
 ## Building
 
-Requires CMake 3.20+ and a C++17 compiler. Dependencies (Inja, nlohmann/json) are fetched automatically.
+Requires CMake 3.20+ and a C++17 compiler.
 
 ```bash
 # Core library + C example only
@@ -67,11 +111,11 @@ cmake --build build
 
 ### CMake options
 
-| Option                   | Default | Description                        |
-|--------------------------|---------|------------------------------------|
-| `BUILD_SQLITE_EXTENSION` | `OFF`   | Build SQLite loadable extension    |
-| `BUILD_DUCKDB_EXTENSION` | `OFF`   | Build DuckDB loadable extension    |
-| `BUILD_PYTHON_BINDINGS`  | `OFF`   | Build nanobind Python module       |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `BUILD_SQLITE_EXTENSION` | `OFF` | Build SQLite loadable extension |
+| `BUILD_DUCKDB_EXTENSION` | `OFF` | Build DuckDB loadable extension |
+| `BUILD_PYTHON_BINDINGS` | `OFF` | Build nanobind Python module |
 
 ### Python bindings
 
@@ -92,7 +136,7 @@ print(render('Hello {{ name }}!', '{\"name\": \"World\"}'))
 
 ```bash
 sqlite3 ':memory:' -cmd '.load build/sqlite/blobtemplates' \
-  "SELECT template_render('{{ x }} + {{ y }} = {{ x + y }}', '{\"x\": 1, \"y\": 2}');"
+  "SELECT bt_render('{{ x }} + {{ y }} = {{ x + y }}', '{\"x\": 1, \"y\": 2}');"
 ```
 
 ### DuckDB
@@ -100,7 +144,7 @@ sqlite3 ':memory:' -cmd '.load build/sqlite/blobtemplates' \
 ```bash
 duckdb -unsigned -c "
   LOAD 'build/duckdb/blobtemplates.duckdb_extension';
-  SELECT template_render('Hello {{ name }}!', json_object('name', name))
+  SELECT bt_render('Hello {{ name }}!', json_object('name', name))
   FROM (VALUES ('Alice'), ('Bob'), ('Charlie')) AS t(name);
 "
 ```
@@ -122,113 +166,15 @@ render_with_options('<<val>>', '{"val": 42}', '{"expression": ["<<", ">>"]}')
 ```
 blobtemplates/
 ├── include/blobtemplates.h              # C API
-├── src/blobtemplates_core.cpp           # Inja wrapper + thread-safe LRU cache
-├── sqlite_ext/src/blobtemplates_sqlite.c  # SQLite extension (with auxdata caching)
+├── src/blobtemplates_core.cpp           # Core wrapper + thread-safe LRU cache
+├── sqlite_ext/src/blobtemplates_sqlite.c  # SQLite extension
 ├── duckdb_ext/src/blobtemplates_duckdb.c  # DuckDB C extension
 ├── python/bindings.cpp                  # nanobind bindings
 ├── example/main.c                       # C demo
 └── CMakeLists.txt
 ```
 
-The core wrapper caches parsed templates in a process-wide LRU cache (capped at 1024 entries) protected by a readers-writer lock. The SQLite extension additionally uses `sqlite3_set_auxdata` / `sqlite3_get_auxdata` for per-statement caching of parsed templates and environments.
-
-## Use cases
-
-### ODBC connection strings
-
-ODBC connection strings use `{` and `}` heavily (e.g. `DRIVER={ODBC Driver 18 for SQL Server}`), which clashes with Inja's default `{{ }}` delimiters. Use `template_render_with_options` to switch to angle-bracket delimiters:
-
-```sql
--- Store connection templates in a table
-CREATE TABLE connection_templates (
-    name     TEXT PRIMARY KEY,
-    template TEXT,
-    options  TEXT DEFAULT '{"expression": ["<<", ">>"], "statement": ["<%", "%>"], "comment": ["<#", "#>"]}'
-);
-
-INSERT INTO connection_templates (name, template) VALUES
-  ('sqlserver',
-   'DRIVER={ODBC Driver 18 for SQL Server};SERVER=<< host >>;DATABASE=<< database >>;UID=<< user >>;PWD=<< password >>;TrustServerCertificate=<< trust_cert >>'),
-  ('postgres',
-   'DRIVER={PostgreSQL Unicode};SERVER=<< host >>;PORT=<< port >>;DATABASE=<< database >>;UID=<< user >>;PWD=<< password >>');
-
--- Render a connection string from parameters
-SELECT template_render_with_options(
-    t.template,
-    json_object(
-        'host', 'dbserver.example.com',
-        'database', 'analytics',
-        'user', 'etl_user',
-        'password', 'secret',
-        'trust_cert', 'yes'
-    ),
-    t.options
-)
-FROM connection_templates t
-WHERE t.name = 'sqlserver';
--- DRIVER={ODBC Driver 18 for SQL Server};SERVER=dbserver.example.com;DATABASE=analytics;UID=etl_user;PWD=secret;TrustServerCertificate=yes
-```
-
-### Dialect-specific SQL generation
-
-Templates can generate SQL tailored to different database backends. This is useful when querying remote catalog tables via ODBC, where each RDBMS has its own system views and syntax:
-
-```sql
-CREATE TABLE catalog_query_templates (
-    dialect  TEXT,
-    query    TEXT,
-    template TEXT
-);
-
-INSERT INTO catalog_query_templates VALUES
-  ('sqlserver', 'list_tables',
-   'SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM [<< database >>].INFORMATION_SCHEMA.TABLES<% if schema %> WHERE TABLE_SCHEMA = ''<< schema >>''<% endif %>'),
-  ('postgres', 'list_tables',
-   'SELECT schemaname, tablename, ''BASE TABLE'' AS table_type FROM pg_catalog.pg_tables<% if schema %> WHERE schemaname = ''<< schema >>''<% endif %> UNION ALL SELECT schemaname, viewname, ''VIEW'' FROM pg_catalog.pg_views<% if schema %> WHERE schemaname = ''<< schema >>''<% endif %>'),
-  ('sqlserver', 'column_stats',
-   'SELECT c.name AS column_name, t.name AS data_type, c.max_length, c.precision, c.scale FROM [<< database >>].sys.columns c JOIN [<< database >>].sys.types t ON c.user_type_id = t.user_type_id WHERE c.object_id = OBJECT_ID(''[<< database >>].[<< schema >>].[<< table >>]'')');
-
--- Generate a catalog query for a specific dialect and database
-SELECT template_render_with_options(
-    t.template,
-    json_object('database', 'analytics', 'schema', 'dbo', 'table', 'customers'),
-    '{"expression": ["<<", ">>"], "statement": ["<%", "%>"]}'
-)
-FROM catalog_query_templates t
-WHERE t.dialect = 'sqlserver' AND t.query = 'column_stats';
-```
-
-This pattern is particularly useful for the **blobfilters** project, which uses DuckDB's nanodbc integration to query remote databases for domain detection and profiling. Templates let you maintain a single codebase that generates the right catalog queries for each target RDBMS — avoiding scattered dialect-specific SQL strings throughout the code.
-
-### DDL code generation (rule4 patterns)
-
-The [phrrngtn/rule4](https://github.com/phrrngtn/rule4) project demonstrates a more advanced pattern: storing Inja templates in a SQLite table and using them with the sqlean [`define`](https://github.com/nickolay/sqlean-define) extension and `eval()` to generate and execute DDL at runtime.
-
-The key elements:
-
-1. **Template storage** — templates live in a `codegen_template` table, versioned and queryable like any other data.
-
-2. **Virtual table functions** — the `define` extension wraps `template_render()` calls as virtual table functions, so generated SQL can be queried directly.
-
-3. **eval() execution** — rendered templates produce DDL (CREATE TABLE, CREATE TRIGGER, etc.) that is executed via `eval()`.
-
-4. **INSTEAD OF triggers** — views over catalog tables become writable via INSTEAD OF triggers whose bodies are themselves template-generated. Inserting into a view like `extended_properties` triggers template rendering, DDL generation, and execution in a single statement.
-
-Example Inja patterns used in rule4:
-
-```
-{# Loop over columns with comma handling #}
-{% for col in columns %}{{ col }}{% if not loop.is_last %}, {% endif %}{% endfor %}
-
-{# Conditional clauses #}
-{% if has_timestamp %}CREATE TRIGGER {{ table }}_audit ...{% endif %}
-
-{# Nested template rendering for multi-stage code generation #}
-SELECT eval(template_render(template, json_object('table', NEW.table_name)))
-FROM codegen_template WHERE name = NEW.template_name;
-```
-
-This approach treats SQL DDL as a templating problem — the database schema itself becomes data-driven and programmable.
+The core wrapper caches parsed templates in a process-wide LRU cache (capped at 1024 entries) protected by a readers-writer lock. The SQLite extension additionally uses `sqlite3_set_auxdata` / `sqlite3_get_auxdata` for per-statement caching of parsed templates, environments, and compiled JMESPath expressions.
 
 ## Prior art
 
