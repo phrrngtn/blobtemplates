@@ -1,10 +1,9 @@
 /*
  * DuckDB C API extension for Inja template rendering.
  *
- * Registers:
- *   template_render(template VARCHAR, json_data VARCHAR) -> VARCHAR
- *   template_render_with_options(template VARCHAR, json_data VARCHAR, options VARCHAR) -> VARCHAR
- *   yaml_to_json(yaml_str VARCHAR) -> VARCHAR
+ * Registers scalar functions with bt_ prefix (see register_functions).
+ * All SQL-visible names use the bt_ prefix to avoid collisions with
+ * DuckDB built-ins and other extensions.
  *
  * Uses the simple C extension mechanism (DUCKDB_EXTENSION_ENTRYPOINT).
  */
@@ -293,10 +292,10 @@ static void yaml_to_json_func(duckdb_function_info info,
 static void register_functions(duckdb_connection connection) {
     duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
 
-    /* 2-arg: template_render(template, json_data) */
+    /* 2-arg: bt_render(template, json_data) */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "template_render");
+        duckdb_scalar_function_set_name(func, "bt_render");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_set_return_type(func, varchar_type);
@@ -305,10 +304,10 @@ static void register_functions(duckdb_connection connection) {
         duckdb_destroy_scalar_function(&func);
     }
 
-    /* 3-arg: template_render_with_options(template, json_data, options) */
+    /* 3-arg: bt_render(template, json_data, options) */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "template_render_with_options");
+        duckdb_scalar_function_set_name(func, "bt_render");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
@@ -319,31 +318,31 @@ static void register_functions(duckdb_connection connection) {
     }
 
     /* JMESPath */
-    register_two_arg(connection, "jmespath_search",
+    register_two_arg(connection, "bt_jmespath",
                      blobtemplates_jmespath_search, varchar_type);
 
     /* JSON diff/patch (jsoncons) */
-    register_two_arg(connection, "json_from_diff",
+    register_two_arg(connection, "bt_json_from_diff",
                      blobtemplates_json_from_diff, varchar_type);
-    register_two_arg(connection, "json_apply_patch",
+    register_two_arg(connection, "bt_json_apply_patch",
                      blobtemplates_json_apply_patch, varchar_type);
 
     /* JSON diff/patch (nlohmann) */
-    register_two_arg(connection, "json_diff",
+    register_two_arg(connection, "bt_json_diff",
                      blobtemplates_json_diff, varchar_type);
-    register_two_arg(connection, "json_patch",
+    register_two_arg(connection, "bt_json_patch",
                      blobtemplates_json_patch, varchar_type);
 
     /* JSON flatten/unflatten */
-    register_one_arg(connection, "json_flatten",
+    register_one_arg(connection, "bt_json_flatten",
                      blobtemplates_json_flatten, varchar_type);
-    register_one_arg(connection, "json_unflatten",
+    register_one_arg(connection, "bt_json_unflatten",
                      blobtemplates_json_unflatten, varchar_type);
 
     /* YAML → JSON (uses length-based API, no null-termination copy) */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "yaml_to_json");
+        duckdb_scalar_function_set_name(func, "bt_yaml_to_json");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_set_return_type(func, varchar_type);
         duckdb_scalar_function_set_function(func, yaml_to_json_func);
@@ -352,13 +351,13 @@ static void register_functions(duckdb_connection connection) {
     }
 
     /* json_nest */
-    register_two_arg(connection, "json_nest",
+    register_two_arg(connection, "bt_json_nest",
                      blobtemplates_json_nest, varchar_type);
 
-    /* text_diff(old_text, new_text) — 2-arg */
+    /* bt_text_diff(old_text, new_text) — 2-arg */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "text_diff");
+        duckdb_scalar_function_set_name(func, "bt_text_diff");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_set_return_type(func, varchar_type);
@@ -367,10 +366,10 @@ static void register_functions(duckdb_connection connection) {
         duckdb_destroy_scalar_function(&func);
     }
 
-    /* text_diff(old_text, new_text, label_old, label_new) — 4-arg */
+    /* bt_text_diff(old_text, new_text, label_old, label_new) — 4-arg */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "text_diff");
+        duckdb_scalar_function_set_name(func, "bt_text_diff");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);

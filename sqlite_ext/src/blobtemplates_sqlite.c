@@ -1,9 +1,8 @@
 /*
  * SQLite loadable extension for Inja template rendering.
  *
- * Registers:
- *   template_render(template, json_data)           -> TEXT
- *   template_render(template, json_data, options)   -> TEXT
+ * Registers scalar functions with bt_ prefix (see sqlite3_blobtemplates_init).
+ * All SQL-visible names use the bt_ prefix to avoid collisions.
  *
  * Uses sqlite3_set_auxdata/sqlite3_get_auxdata to cache:
  *   - The parsed inja::Template (keyed on arg 0 — the template string)
@@ -247,76 +246,76 @@ int sqlite3_blobtemplates_init(sqlite3 *db, char **pzErrMsg,
     int rc;
     SQLITE_EXTENSION_INIT2(pApi);
 
-    rc = sqlite3_create_function(db, "template_render", 2,
+    rc = sqlite3_create_function(db, "bt_render", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, inja_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function(db, "template_render", 3,
+    rc = sqlite3_create_function(db, "bt_render", 3,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, inja_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* JMESPath */
-    rc = sqlite3_create_function(db, "jmespath_search", 2,
+    rc = sqlite3_create_function(db, "bt_jmespath", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, jmespath_search_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* JSON diff/patch (jsoncons) */
-    rc = sqlite3_create_function(db, "json_from_diff", 2,
+    rc = sqlite3_create_function(db, "bt_json_from_diff", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_from_diff,
                                   two_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function(db, "json_apply_patch", 2,
+    rc = sqlite3_create_function(db, "bt_json_apply_patch", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_apply_patch,
                                   two_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* JSON diff/patch (nlohmann) */
-    rc = sqlite3_create_function(db, "json_diff", 2,
+    rc = sqlite3_create_function(db, "bt_json_diff", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_diff,
                                   two_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function(db, "json_patch", 2,
+    rc = sqlite3_create_function(db, "bt_json_patch", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_patch,
                                   two_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* JSON flatten/unflatten */
-    rc = sqlite3_create_function(db, "json_flatten", 1,
+    rc = sqlite3_create_function(db, "bt_json_flatten", 1,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_flatten,
                                   one_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function(db, "json_unflatten", 1,
+    rc = sqlite3_create_function(db, "bt_json_unflatten", 1,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_unflatten,
                                   one_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* json_nest */
-    rc = sqlite3_create_function(db, "json_nest", 2,
+    rc = sqlite3_create_function(db, "bt_json_nest", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_nest,
                                   two_arg_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* text_diff (variadic: 2 or 4 args) */
-    rc = sqlite3_create_function(db, "text_diff", -1,
+    rc = sqlite3_create_function(db, "bt_text_diff", -1,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, text_diff_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    /* YAML → JSON */
-    rc = sqlite3_create_function(db, "yaml_to_json", 1,
+    /* YAML -> JSON */
+    rc = sqlite3_create_function(db, "bt_yaml_to_json", 1,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_yaml_to_json,
                                   one_arg_func, NULL, NULL);
