@@ -208,6 +208,35 @@ static void one_arg_func(sqlite3_context *ctx, int argc,
     }
 }
 
+/* ── text_diff (2 or 4 args) ─────────────────────────────────────── */
+
+static void text_diff_func(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
+    if (argc < 2) {
+        sqlite3_result_error(ctx, "text_diff requires at least 2 arguments", -1);
+        return;
+    }
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
+        sqlite3_value_type(argv[1]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+
+    const char *old_text = (const char *)sqlite3_value_text(argv[0]);
+    const char *new_text = (const char *)sqlite3_value_text(argv[1]);
+    const char *label_old = (argc >= 3 && sqlite3_value_type(argv[2]) != SQLITE_NULL)
+                             ? (const char *)sqlite3_value_text(argv[2]) : NULL;
+    const char *label_new = (argc >= 4 && sqlite3_value_type(argv[3]) != SQLITE_NULL)
+                             ? (const char *)sqlite3_value_text(argv[3]) : NULL;
+
+    char *result = blobtemplates_text_diff(old_text, new_text, label_old, label_new, 3);
+    if (result) {
+        sqlite3_result_text(ctx, result, -1, SQLITE_TRANSIENT);
+        blobtemplates_free(result);
+    } else {
+        sqlite3_result_error(ctx, blobtemplates_errmsg(), -1);
+    }
+}
+
 /* ── Extension init ──────────────────────────────────────────────── */
 
 #ifdef _WIN32
@@ -271,6 +300,19 @@ int sqlite3_blobtemplates_init(sqlite3 *db, char **pzErrMsg,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_json_unflatten,
                                   one_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* json_nest */
+    rc = sqlite3_create_function(db, "json_nest", 2,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  (void *)blobtemplates_json_nest,
+                                  two_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* text_diff (variadic: 2 or 4 args) */
+    rc = sqlite3_create_function(db, "text_diff", -1,
+                                  SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                  NULL, text_diff_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
     /* YAML → JSON */

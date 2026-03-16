@@ -27,6 +27,13 @@ FetchContent_Declare(jsoncons
   GIT_TAG        v1.1.0
   GIT_SHALLOW    TRUE)
 
+# ── dtl (diff template library, header-only) ────────────────────
+FetchContent_Declare(dtl
+  GIT_REPOSITORY https://github.com/cubicdaiya/dtl.git
+  GIT_TAG        v1.21
+  GIT_SHALLOW    TRUE)
+FetchContent_MakeAvailable(dtl)
+
 # ── rapidyaml (fast YAML parser with JSON emission) ─────────────
 FetchContent_Declare(ryml
   GIT_REPOSITORY https://github.com/biojppm/rapidyaml.git
@@ -37,7 +44,7 @@ FetchContent_MakeAvailable(nlohmann_json inja jsoncons ryml)
 
 # ── Core sources (compiled into each target) ──────────────────────
 set(BT_SOURCES src/blobtemplates_core.cpp)
-set(BT_INCLUDES include)
+set(BT_INCLUDES include ${dtl_SOURCE_DIR})
 set(BT_LIBS pantor::inja nlohmann_json::nlohmann_json jsoncons ryml::ryml)
 
 # ── C example ─────────────────────────────────────────────────────

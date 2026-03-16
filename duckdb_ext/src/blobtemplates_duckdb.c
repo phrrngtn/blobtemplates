@@ -31,6 +31,20 @@ static const char *str_ptr(duckdb_string_t *s, uint32_t *out_len) {
     return s->value.pointer.ptr;
 }
 
+/* Null-terminate a DuckDB string */
+static char *str_dup_z(duckdb_string_t *s) {
+    uint32_t len;
+    const char *p = str_ptr(s, &len);
+    char *z = (char *)malloc(len + 1);
+    memcpy(z, p, len);
+    z[len] = '\0';
+    return z;
+}
+
+/* Forward declarations for text_diff functions */
+static void text_diff_func(duckdb_function_info, duckdb_data_chunk, duckdb_vector);
+static void text_diff_labeled_func(duckdb_function_info, duckdb_data_chunk, duckdb_vector);
+
 /* ── 2-arg template_render ────────────────────────────────────────── */
 
 static void template_render_func(duckdb_function_info info,
@@ -337,7 +351,109 @@ static void register_functions(duckdb_connection connection) {
         duckdb_destroy_scalar_function(&func);
     }
 
+    /* json_nest */
+    register_two_arg(connection, "json_nest",
+                     blobtemplates_json_nest, varchar_type);
+
+    /* text_diff(old_text, new_text) — 2-arg */
+    {
+        duckdb_scalar_function func = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(func, "text_diff");
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_set_return_type(func, varchar_type);
+        duckdb_scalar_function_set_function(func, text_diff_func);
+        duckdb_register_scalar_function(connection, func);
+        duckdb_destroy_scalar_function(&func);
+    }
+
+    /* text_diff(old_text, new_text, label_old, label_new) — 4-arg */
+    {
+        duckdb_scalar_function func = duckdb_create_scalar_function();
+        duckdb_scalar_function_set_name(func, "text_diff");
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_add_parameter(func, varchar_type);
+        duckdb_scalar_function_set_return_type(func, varchar_type);
+        duckdb_scalar_function_set_function(func, text_diff_labeled_func);
+        duckdb_register_scalar_function(connection, func);
+        duckdb_destroy_scalar_function(&func);
+    }
+
     duckdb_destroy_logical_type(&varchar_type);
+}
+
+/* ── text_diff DuckDB wrappers ──────────────────────────────────── */
+
+static void text_diff_func(duckdb_function_info info,
+                             duckdb_data_chunk input,
+                             duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+
+    for (idx_t row = 0; row < size; row++) {
+        if ((val0 && !duckdb_validity_row_is_valid(val0, row)) ||
+            (val1 && !duckdb_validity_row_is_valid(val1, row))) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        char *old_text = str_dup_z(&data0[row]);
+        char *new_text = str_dup_z(&data1[row]);
+        char *result = blobtemplates_text_diff(old_text, new_text, NULL, NULL, 3);
+        free(old_text); free(new_text);
+        if (result) {
+            duckdb_vector_assign_string_element(output, row, result);
+            blobtemplates_free(result);
+        } else {
+            duckdb_scalar_function_set_error(info, blobtemplates_errmsg());
+            return;
+        }
+    }
+}
+
+static void text_diff_labeled_func(duckdb_function_info info,
+                                     duckdb_data_chunk input,
+                                     duckdb_vector output) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec0 = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_vector vec1 = duckdb_data_chunk_get_vector(input, 1);
+    duckdb_vector vec2 = duckdb_data_chunk_get_vector(input, 2);
+    duckdb_vector vec3 = duckdb_data_chunk_get_vector(input, 3);
+    duckdb_string_t *data0 = (duckdb_string_t *)duckdb_vector_get_data(vec0);
+    duckdb_string_t *data1 = (duckdb_string_t *)duckdb_vector_get_data(vec1);
+    duckdb_string_t *data2 = (duckdb_string_t *)duckdb_vector_get_data(vec2);
+    duckdb_string_t *data3 = (duckdb_string_t *)duckdb_vector_get_data(vec3);
+    uint64_t *val0 = duckdb_vector_get_validity(vec0);
+    uint64_t *val1 = duckdb_vector_get_validity(vec1);
+
+    for (idx_t row = 0; row < size; row++) {
+        if ((val0 && !duckdb_validity_row_is_valid(val0, row)) ||
+            (val1 && !duckdb_validity_row_is_valid(val1, row))) {
+            duckdb_vector_ensure_validity_writable(output);
+            duckdb_validity_set_row_invalid(duckdb_vector_get_validity(output), row);
+            continue;
+        }
+        char *old_text  = str_dup_z(&data0[row]);
+        char *new_text  = str_dup_z(&data1[row]);
+        char *label_old = str_dup_z(&data2[row]);
+        char *label_new = str_dup_z(&data3[row]);
+        char *result = blobtemplates_text_diff(old_text, new_text, label_old, label_new, 3);
+        free(old_text); free(new_text); free(label_old); free(label_new);
+        if (result) {
+            duckdb_vector_assign_string_element(output, row, result);
+            blobtemplates_free(result);
+        } else {
+            duckdb_scalar_function_set_error(info, blobtemplates_errmsg());
+            return;
+        }
+    }
 }
 
 /* ── Extension entrypoint ────────────────────────────────────────── */

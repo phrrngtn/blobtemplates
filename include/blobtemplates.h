@@ -149,6 +149,34 @@ char *blobtemplates_json_flatten(const char *json);
  */
 char *blobtemplates_json_unflatten(const char *json);
 
+/*
+ * Reshape a flat JSON array of objects into a nested object hierarchy.
+ *
+ * keys_json is a JSON array of field names to nest by,
+ * e.g. ["TABLE_SCHEM","TABLE_NAME","COLUMN_NAME"].
+ * Key fields are removed from leaf objects; remaining fields become the leaf value.
+ */
+char *blobtemplates_json_nest(const char *data_json, const char *keys_json);
+
+/* ── Text diff (via dtl) ─────────────────────────────────────────── */
+
+/*
+ * Compute a unified diff between two text strings.
+ * Returns standard unified diff format (--- / +++ / @@ lines).
+ *
+ * label_old / label_new are optional labels for the --- / +++ headers.
+ * Pass NULL for default labels ("a", "b").
+ *
+ * context_lines is the number of context lines around each hunk (default: 3).
+ *
+ * Returns a malloc'd string on success (caller must free with blobtemplates_free).
+ * Returns empty string if the inputs are identical.
+ * Returns NULL on error; call blobtemplates_errmsg() for details.
+ */
+char *blobtemplates_text_diff(const char *old_text, const char *new_text,
+                               const char *label_old, const char *label_new,
+                               int context_lines);
+
 /* ── YAML processing (via rapidyaml) ─────────────────────────────── */
 
 /*

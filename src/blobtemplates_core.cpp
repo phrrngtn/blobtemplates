@@ -5,6 +5,7 @@
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jmespath/jmespath.hpp>
 #include <jsoncons_ext/jsonpatch/jsonpatch.hpp>
+#include <dtl/dtl.hpp>
 #include <ryml.hpp>
 #include <ryml_std.hpp>
 
@@ -708,6 +709,120 @@ char *blobtemplates_yaml_to_json_n(const char *yaml_str, size_t yaml_len) {
            JSON requires U+0000..U+001F to be escaped. */
         std::string safe = escape_json_control_chars(json);
         return strdup_result(safe);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+/* ── json_nest ───────────────────────────────────────────────────── */
+
+char *blobtemplates_json_nest(const char *data_json, const char *keys_json) {
+    try {
+        g_errmsg.clear();
+        auto data = jsoncons::json::parse(data_json);
+        auto keys = jsoncons::json::parse(keys_json);
+
+        if (!data.is_array() || !keys.is_array())
+            throw std::runtime_error("json_nest: data must be array, keys must be array of strings");
+
+        std::vector<std::string> key_names;
+        for (const auto &k : keys.array_range()) {
+            key_names.push_back(k.as<std::string>());
+        }
+        if (key_names.empty())
+            throw std::runtime_error("json_nest: keys array must not be empty");
+
+        jsoncons::json result(jsoncons::json_object_arg);
+
+        for (const auto &row : data.array_range()) {
+            if (!row.is_object()) continue;
+
+            jsoncons::json *node = &result;
+            for (size_t i = 0; i < key_names.size(); i++) {
+                const auto &key = key_names[i];
+                if (!row.contains(key)) break;
+                std::string key_val = row[key].as<std::string>();
+
+                if (i == key_names.size() - 1) {
+                    jsoncons::json leaf(jsoncons::json_object_arg);
+                    for (const auto &member : row.object_range()) {
+                        bool is_key = false;
+                        for (const auto &kn : key_names) {
+                            if (member.key() == kn) { is_key = true; break; }
+                        }
+                        if (!is_key) {
+                            leaf.insert_or_assign(member.key(), member.value());
+                        }
+                    }
+                    node->insert_or_assign(key_val, std::move(leaf));
+                } else {
+                    if (!node->contains(key_val)) {
+                        node->insert_or_assign(key_val,
+                            jsoncons::json(jsoncons::json_object_arg));
+                    }
+                    node = &((*node)[key_val]);
+                }
+            }
+        }
+
+        return strdup_result(result.to_string());
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+/* ── text_diff ──────────────────────────────────────────────────── */
+
+static std::vector<std::string> split_lines(const std::string &s) {
+    std::vector<std::string> lines;
+    std::string::size_type start = 0;
+    while (start < s.size()) {
+        auto nl = s.find('\n', start);
+        if (nl == std::string::npos) {
+            lines.push_back(s.substr(start));
+            break;
+        }
+        lines.push_back(s.substr(start, nl - start));
+        start = nl + 1;
+    }
+    if (!s.empty() && s.back() == '\n') {
+        lines.push_back("");
+    }
+    return lines;
+}
+
+char *blobtemplates_text_diff(const char *old_text, const char *new_text,
+                               const char *label_old, const char *label_new,
+                               int context_lines) {
+    try {
+        g_errmsg.clear();
+
+        if (!label_old) label_old = "a";
+        if (!label_new) label_new = "b";
+        if (context_lines < 0) context_lines = 3;
+
+        auto old_lines = split_lines(old_text ? old_text : "");
+        auto new_lines = split_lines(new_text ? new_text : "");
+
+        dtl::Diff<std::string> diff(old_lines, new_lines);
+        diff.compose();
+        diff.composeUnifiedHunks();
+
+        std::stringstream ss;
+        diff.printUnifiedFormat(ss);
+
+        std::string raw = ss.str();
+
+        std::string result;
+        if (!raw.empty()) {
+            result = "--- " + std::string(label_old) + "\n"
+                   + "+++ " + std::string(label_new) + "\n"
+                   + raw;
+        }
+
+        return strdup_result(result);
     } catch (const std::exception &e) {
         g_errmsg = e.what();
         return nullptr;
