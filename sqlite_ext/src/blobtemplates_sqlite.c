@@ -246,12 +246,12 @@ int sqlite3_blobtemplates_init(sqlite3 *db, char **pzErrMsg,
     int rc;
     SQLITE_EXTENSION_INIT2(pApi);
 
-    rc = sqlite3_create_function(db, "bt_render", 2,
+    rc = sqlite3_create_function(db, "bt_template_render", 2,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, inja_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;
 
-    rc = sqlite3_create_function(db, "bt_render", 3,
+    rc = sqlite3_create_function(db, "bt_template_render", 3,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   NULL, inja_func, NULL, NULL);
     if (rc != SQLITE_OK) return rc;

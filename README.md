@@ -21,8 +21,8 @@ All SQL functions use the `bt_` prefix. Both the SQLite and DuckDB extensions re
 
 | Function | Description |
 |----------|-------------|
-| `bt_render(template, json)` | Render an Inja/Jinja2-style template against a JSON object |
-| `bt_render(template, json, options)` | Same, with a JSON options argument to override delimiters |
+| `bt_template_render(template, json)` | Render an Inja/Jinja2-style template against a JSON object |
+| `bt_template_render(template, json, options)` | Same, with a JSON options argument to override delimiters |
 
 The options JSON supports these keys:
 
@@ -136,7 +136,7 @@ print(render('Hello {{ name }}!', '{\"name\": \"World\"}'))
 
 ```bash
 sqlite3 ':memory:' -cmd '.load build/sqlite/blobtemplates' \
-  "SELECT bt_render('{{ x }} + {{ y }} = {{ x + y }}', '{\"x\": 1, \"y\": 2}');"
+  "SELECT bt_template_render('{{ x }} + {{ y }} = {{ x + y }}', '{\"x\": 1, \"y\": 2}');"
 ```
 
 ### DuckDB
@@ -144,7 +144,7 @@ sqlite3 ':memory:' -cmd '.load build/sqlite/blobtemplates' \
 ```bash
 duckdb -unsigned -c "
   LOAD 'build/duckdb/blobtemplates.duckdb_extension';
-  SELECT bt_render('Hello {{ name }}!', json_object('name', name))
+  SELECT bt_template_render('Hello {{ name }}!', json_object('name', name))
   FROM (VALUES ('Alice'), ('Bob'), ('Charlie')) AS t(name);
 "
 ```

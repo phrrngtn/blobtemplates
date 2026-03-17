@@ -292,10 +292,10 @@ static void yaml_to_json_func(duckdb_function_info info,
 static void register_functions(duckdb_connection connection) {
     duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
 
-    /* 2-arg: bt_render(template, json_data) */
+    /* 2-arg: bt_template_render(template, json_data) */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "bt_render");
+        duckdb_scalar_function_set_name(func, "bt_template_render");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_set_return_type(func, varchar_type);
@@ -304,10 +304,10 @@ static void register_functions(duckdb_connection connection) {
         duckdb_destroy_scalar_function(&func);
     }
 
-    /* 3-arg: bt_render(template, json_data, options) */
+    /* 3-arg: bt_template_render(template, json_data, options) */
     {
         duckdb_scalar_function func = duckdb_create_scalar_function();
-        duckdb_scalar_function_set_name(func, "bt_render");
+        duckdb_scalar_function_set_name(func, "bt_template_render");
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
         duckdb_scalar_function_add_parameter(func, varchar_type);
