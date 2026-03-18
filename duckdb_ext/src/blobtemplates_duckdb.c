@@ -455,11 +455,202 @@ static void text_diff_labeled_func(duckdb_function_info info,
     }
 }
 
+/* ── bt_json_patch_fold aggregate ────────────────────────────────── */
+/*
+ * Ordered aggregate that folds a sequence of JSON values via RFC 6902 patch.
+ *
+ * The first non-NULL value (per ORDER BY) becomes the base document.
+ * Each subsequent value is applied as a JSON Patch array on top of the
+ * accumulated document.
+ *
+ * Option 1 — plain aggregate:
+ *   SELECT bt_json_patch_fold(val ORDER BY rev)
+ *   FROM (snapshot UNION ALL patches) GROUP BY entity_id
+ *
+ * Option 3 — window function (cumulative):
+ *   SELECT bt_json_patch_fold(val) OVER (
+ *       PARTITION BY entity_id ORDER BY rev
+ *       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+ *   )
+ *   FROM (snapshot UNION ALL patches)
+ */
+
+/*
+ * Aggregate state holds a parsed JSON document handle (blobtemplates_json_doc)
+ * to avoid repeated serialize/parse cycles during the fold.  Only the
+ * finalize callback serializes to a string.
+ */
+typedef struct {
+    blobtemplates_json_doc *doc;  /* NULL = no value yet */
+} JsonPatchFoldState;
+
+static idx_t json_patch_fold_state_size(duckdb_function_info info) {
+    (void)info;
+    return sizeof(JsonPatchFoldState);
+}
+
+static void json_patch_fold_init(duckdb_function_info info,
+                                   duckdb_aggregate_state state) {
+    (void)info;
+    JsonPatchFoldState *s = (JsonPatchFoldState *)state;
+    s->doc = NULL;
+}
+
+static void json_patch_fold_update(duckdb_function_info info,
+                                     duckdb_data_chunk input,
+                                     duckdb_aggregate_state *states) {
+    idx_t size = duckdb_data_chunk_get_size(input);
+    duckdb_vector vec = duckdb_data_chunk_get_vector(input, 0);
+    duckdb_string_t *data = (duckdb_string_t *)duckdb_vector_get_data(vec);
+    uint64_t *validity = duckdb_vector_get_validity(vec);
+
+    /* For ordered aggregates, only states[0] is initialized; states[1..N]
+     * may be NULL or garbage.  For window functions, every states[row] is
+     * properly initialized.  Distinguish by checking states[1]: NULL means
+     * ordered aggregate (use states[0] for all rows), non-NULL means
+     * per-row window state mapping. */
+    int single_state = (size <= 1 || states[1] == NULL);
+
+    for (idx_t row = 0; row < size; row++) {
+        if (validity && !duckdb_validity_row_is_valid(validity, row))
+            continue;
+
+        JsonPatchFoldState *s = (JsonPatchFoldState *)(
+            single_state ? states[0] : states[row]);
+
+        uint32_t len;
+        const char *val = str_ptr(&data[row], &len);
+
+        /* null-terminate for the core library */
+        char *val_z = (char *)malloc(len + 1);
+        if (!val_z) {
+            duckdb_aggregate_function_set_error(info, "out of memory");
+            return;
+        }
+        memcpy(val_z, val, len);
+        val_z[len] = '\0';
+
+        if (s->doc == NULL) {
+            /* First value: parse into opaque document handle */
+            s->doc = blobtemplates_json_doc_parse(val_z);
+            free(val_z);
+            if (!s->doc) {
+                duckdb_aggregate_function_set_error(info, blobtemplates_errmsg());
+                return;
+            }
+        } else {
+            /* Subsequent values: apply patch in-place (no re-parsing of doc) */
+            int rc = blobtemplates_json_doc_apply_patch(s->doc, val_z);
+            free(val_z);
+            if (rc != 0) {
+                duckdb_aggregate_function_set_error(info, blobtemplates_errmsg());
+                return;
+            }
+        }
+    }
+}
+
+static void json_patch_fold_combine(duckdb_function_info info,
+                                      duckdb_aggregate_state *source,
+                                      duckdb_aggregate_state *target,
+                                      idx_t count) {
+    /*
+     * Combine is reached in non-ordered / parallel paths.
+     * Serialize source doc and apply as patch on target.
+     * This is a rare path; correctness over performance.
+     */
+    for (idx_t i = 0; i < count; i++) {
+        JsonPatchFoldState *src = (JsonPatchFoldState *)source[i];
+        JsonPatchFoldState *tgt = (JsonPatchFoldState *)target[i];
+
+        if (src->doc == NULL) continue;
+        if (tgt->doc == NULL) {
+            tgt->doc = src->doc;
+            src->doc = NULL;
+        } else {
+            /* Serialize source, apply as patch on target */
+            char *src_json = blobtemplates_json_doc_serialize(src->doc);
+            if (src_json) {
+                int rc = blobtemplates_json_doc_apply_patch(tgt->doc, src_json);
+                blobtemplates_free(src_json);
+                if (rc != 0) {
+                    duckdb_aggregate_function_set_error(info, blobtemplates_errmsg());
+                }
+            }
+            blobtemplates_json_doc_destroy(src->doc);
+            src->doc = NULL;
+        }
+    }
+}
+
+static void json_patch_fold_finalize(duckdb_function_info info,
+                                       duckdb_aggregate_state *source,
+                                       duckdb_vector result,
+                                       idx_t count, idx_t offset) {
+    (void)info;
+    for (idx_t i = 0; i < count; i++) {
+        JsonPatchFoldState *s = (JsonPatchFoldState *)source[i];
+        if (s->doc) {
+            char *json = blobtemplates_json_doc_serialize(s->doc);
+            if (json) {
+                duckdb_vector_assign_string_element(result, offset + i, json);
+                blobtemplates_free(json);
+            } else {
+                duckdb_vector_ensure_validity_writable(result);
+                duckdb_validity_set_row_invalid(
+                    duckdb_vector_get_validity(result), offset + i);
+            }
+        } else {
+            duckdb_vector_ensure_validity_writable(result);
+            duckdb_validity_set_row_invalid(
+                duckdb_vector_get_validity(result), offset + i);
+        }
+    }
+}
+
+static void json_patch_fold_destroy(duckdb_aggregate_state *states,
+                                      idx_t count) {
+    for (idx_t i = 0; i < count; i++) {
+        JsonPatchFoldState *s = (JsonPatchFoldState *)states[i];
+        if (s->doc) {
+            blobtemplates_json_doc_destroy(s->doc);
+            s->doc = NULL;
+        }
+    }
+}
+
+/* ── Helper: register aggregate functions ────────────────────────── */
+
+static void register_aggregates(duckdb_connection connection) {
+    duckdb_logical_type varchar_type = duckdb_create_logical_type(DUCKDB_TYPE_VARCHAR);
+
+    /* bt_json_patch_fold(json_value) → VARCHAR */
+    {
+        duckdb_aggregate_function func = duckdb_create_aggregate_function();
+        duckdb_aggregate_function_set_name(func, "bt_json_patch_fold");
+        duckdb_aggregate_function_add_parameter(func, varchar_type);
+        duckdb_aggregate_function_set_return_type(func, varchar_type);
+        duckdb_aggregate_function_set_functions(
+            func,
+            json_patch_fold_state_size,
+            json_patch_fold_init,
+            json_patch_fold_update,
+            json_patch_fold_combine,
+            json_patch_fold_finalize);
+        duckdb_aggregate_function_set_destructor(func, json_patch_fold_destroy);
+        duckdb_register_aggregate_function(connection, func);
+        duckdb_destroy_aggregate_function(&func);
+    }
+
+    duckdb_destroy_logical_type(&varchar_type);
+}
+
 /* ── Extension entrypoint ────────────────────────────────────────── */
 
 DUCKDB_EXTENSION_ENTRYPOINT(duckdb_connection connection,
                              duckdb_extension_info info,
                              struct duckdb_extension_access *access) {
     register_functions(connection);
+    register_aggregates(connection);
     return true;
 }

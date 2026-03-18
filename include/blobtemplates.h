@@ -125,6 +125,39 @@ char *blobtemplates_json_from_diff(const char *source, const char *target);
  */
 char *blobtemplates_json_apply_patch(const char *json, const char *patch);
 
+/* ── Parsed JSON document handle (for aggregate/fold use) ────────── */
+
+/*
+ * Opaque handle to a parsed JSON document (jsoncons).
+ * Avoids repeated serialize/parse cycles when accumulating patches.
+ */
+typedef struct blobtemplates_json_doc blobtemplates_json_doc;
+
+/*
+ * Parse a JSON string into an opaque document handle.
+ * Returns NULL on error; call blobtemplates_errmsg() for details.
+ */
+blobtemplates_json_doc *blobtemplates_json_doc_parse(const char *json);
+
+/*
+ * Apply an RFC 6902 JSON Patch to a parsed document IN PLACE.
+ * The patch is parsed from the string; the document is modified directly.
+ * Returns 0 on success, non-zero on error (call blobtemplates_errmsg()).
+ */
+int blobtemplates_json_doc_apply_patch(blobtemplates_json_doc *doc,
+                                        const char *patch);
+
+/*
+ * Serialize a parsed document to a JSON string.
+ * Returns a malloc'd string (caller must free with blobtemplates_free).
+ */
+char *blobtemplates_json_doc_serialize(const blobtemplates_json_doc *doc);
+
+/*
+ * Destroy a parsed document handle.
+ */
+void blobtemplates_json_doc_destroy(blobtemplates_json_doc *doc);
+
 /*
  * JSON diff using nlohmann::json::diff (RFC 6902).
  * Returns a malloc'd JSON Patch array (caller must free with blobtemplates_free).

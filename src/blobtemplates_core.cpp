@@ -589,6 +589,53 @@ char *blobtemplates_json_apply_patch(const char *json, const char *patch) {
     }
 }
 
+/* ── Parsed JSON document handle ──────────────────────────────── */
+
+struct blobtemplates_json_doc {
+    jsoncons::json doc;
+    blobtemplates_json_doc(jsoncons::json d) : doc(std::move(d)) {}
+};
+
+blobtemplates_json_doc *blobtemplates_json_doc_parse(const char *json) {
+    try {
+        g_errmsg.clear();
+        auto d = jsoncons::json::parse(json ? json : "null");
+        return new blobtemplates_json_doc(std::move(d));
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+int blobtemplates_json_doc_apply_patch(blobtemplates_json_doc *doc,
+                                        const char *patch) {
+    try {
+        g_errmsg.clear();
+        auto p = jsoncons::json::parse(patch ? patch : "[]");
+        jsoncons::jsonpatch::apply_patch(doc->doc, p);
+        return 0;
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return -1;
+    }
+}
+
+char *blobtemplates_json_doc_serialize(const blobtemplates_json_doc *doc) {
+    try {
+        g_errmsg.clear();
+        std::string s;
+        doc->doc.dump(s);
+        return strdup_result(s);
+    } catch (const std::exception &e) {
+        g_errmsg = e.what();
+        return nullptr;
+    }
+}
+
+void blobtemplates_json_doc_destroy(blobtemplates_json_doc *doc) {
+    delete doc;
+}
+
 /* ── JSON diff/patch (nlohmann) ───────────────────────────────── */
 
 char *blobtemplates_json_diff(const char *source, const char *target) {

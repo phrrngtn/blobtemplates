@@ -236,6 +236,90 @@ static void text_diff_func(sqlite3_context *ctx, int argc, sqlite3_value **argv)
     }
 }
 
+/* ── bt_json_patch_fold aggregate / window function ──────────────── */
+/*
+ * Ordered aggregate that folds JSON values via RFC 6902 patch.
+ *
+ * First non-NULL value becomes the base document.
+ * Each subsequent value is applied as a JSON Patch array.
+ *
+ * Registered as a window function so it works efficiently with:
+ *   bt_json_patch_fold(val) OVER (ORDER BY rev
+ *       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+ *
+ * xInverse errors because JSON patch is not invertible — the window
+ * frame must only grow (UNBOUNDED PRECEDING).
+ */
+
+/*
+ * Aggregate state holds a parsed JSON document handle to avoid
+ * repeated serialize/parse cycles during the fold.  Only the
+ * xValue and xFinal callbacks serialize to a string.
+ */
+typedef struct {
+    blobtemplates_json_doc *doc;  /* NULL = no value yet */
+} PatchFoldCtx;
+
+static void patch_fold_step(sqlite3_context *ctx, int argc,
+                              sqlite3_value **argv) {
+    (void)argc;
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) return;
+
+    PatchFoldCtx *p = (PatchFoldCtx *)sqlite3_aggregate_context(ctx, sizeof(*p));
+    if (!p) return;
+
+    const char *val = (const char *)sqlite3_value_text(argv[0]);
+
+    if (p->doc == NULL) {
+        /* First value: parse into opaque document handle */
+        p->doc = blobtemplates_json_doc_parse(val);
+        if (!p->doc) {
+            sqlite3_result_error(ctx, blobtemplates_errmsg(), -1);
+        }
+    } else {
+        /* Subsequent values: apply patch in-place (no re-parsing of doc) */
+        if (blobtemplates_json_doc_apply_patch(p->doc, val) != 0) {
+            sqlite3_result_error(ctx, blobtemplates_errmsg(), -1);
+        }
+    }
+}
+
+static void patch_fold_emit(sqlite3_context *ctx, int destroy) {
+    PatchFoldCtx *p = (PatchFoldCtx *)sqlite3_aggregate_context(ctx, 0);
+    if (p && p->doc) {
+        char *json = blobtemplates_json_doc_serialize(p->doc);
+        if (json) {
+            sqlite3_result_text(ctx, json, -1, SQLITE_TRANSIENT);
+            blobtemplates_free(json);
+        } else {
+            sqlite3_result_error(ctx, blobtemplates_errmsg(), -1);
+        }
+        if (destroy) {
+            blobtemplates_json_doc_destroy(p->doc);
+            p->doc = NULL;
+        }
+    } else {
+        sqlite3_result_null(ctx);
+    }
+}
+
+static void patch_fold_final(sqlite3_context *ctx) {
+    patch_fold_emit(ctx, 1);
+}
+
+static void patch_fold_value(sqlite3_context *ctx) {
+    patch_fold_emit(ctx, 0);
+}
+
+static void patch_fold_inverse(sqlite3_context *ctx, int argc,
+                                 sqlite3_value **argv) {
+    (void)argc;
+    (void)argv;
+    sqlite3_result_error(ctx,
+        "bt_json_patch_fold: window frame shrinking not supported "
+        "(use UNBOUNDED PRECEDING)", -1);
+}
+
 /* ── Extension init ──────────────────────────────────────────────── */
 
 #ifdef _WIN32
@@ -319,5 +403,16 @@ int sqlite3_blobtemplates_init(sqlite3 *db, char **pzErrMsg,
                                   SQLITE_UTF8 | SQLITE_DETERMINISTIC,
                                   (void *)blobtemplates_yaml_to_json,
                                   one_arg_func, NULL, NULL);
+    if (rc != SQLITE_OK) return rc;
+
+    /* JSON patch fold — aggregate + window function */
+    rc = sqlite3_create_window_function(db, "bt_json_patch_fold", 1,
+                                          SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                          NULL,
+                                          patch_fold_step,
+                                          patch_fold_final,
+                                          patch_fold_value,
+                                          patch_fold_inverse,
+                                          NULL);
     return rc;
 }

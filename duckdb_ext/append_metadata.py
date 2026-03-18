@@ -41,7 +41,7 @@ def main():
         f.write(pad(""))            # field6: reserved
         f.write(pad("C_STRUCT"))    # field5: abi type
         f.write(pad("v0.1.0"))      # field4: extension version
-        f.write(pad("v1.2.0"))      # field3: duckdb version (stable API baseline)
+        f.write(pad("v1.2.0"))      # field3: duckdb C API version
         f.write(pad(plat))          # field2: platform
         f.write(pad("4"))           # field1: magic
         f.write(b"\x00" * 256)      # signature placeholder
