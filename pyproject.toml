@@ -18,3 +18,4 @@ Repository = "https://github.com/phrrngtn/blobtemplates"
 cmake.args = ["-DBUILD_PYTHON_BINDINGS=ON"]
 wheel.packages = ["python/blobtemplates"]
 
+# trigger
