@@ -1,0 +1,19 @@
+[build-system]
+requires = ["scikit-build-core>=0.5"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "blobtemplates-sqlite"
+version = "0.1.1"
+description = "blobtemplates SQLite extension — loadable via .load command"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [{name = "Paul Harrington"}]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/phrrngtn/blobtemplates"
+
+[tool.scikit-build]
+wheel.packages = ["blobtemplates_sqlite"]
+sdist.include = ["src/**", "include/**", "sqlite_ext/**"]

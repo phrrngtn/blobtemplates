@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
+# Silence "Compatibility with CMake < 3.10 will be removed" warnings from
+# vendored dependencies (inja declares cmake_minimum_required(VERSION 3.5))
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 OLD)
+endif()
 project(blobtemplates LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -26,6 +31,7 @@ FetchContent_Declare(jsoncons
   GIT_REPOSITORY https://github.com/danielaparker/jsoncons.git
   GIT_TAG        v1.1.0
   GIT_SHALLOW    TRUE)
+set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
 # ── dtl (diff template library, header-only) ────────────────────
 FetchContent_Declare(dtl
@@ -66,6 +72,7 @@ if(BUILD_PYTHON_BINDINGS)
   target_link_libraries(blobtemplates_ext PRIVATE ${BT_LIBS})
   set_target_properties(blobtemplates_ext PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python/blobtemplates")
+  install(TARGETS blobtemplates_ext LIBRARY DESTINATION blobtemplates)
 endif()
 
 # ── DuckDB C API headers (for extension build) ────────────────────
