@@ -6,6 +6,7 @@ project(blobtemplates_duckdb LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Sources are symlinked/copied into this directory from the parent project
 set(BT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
