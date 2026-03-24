@@ -14,8 +14,7 @@ EXPECTED_FUNCTIONS = [
     "bt_text_diff",
 ]
 
-conn = duckdb.connect()
-conn.execute("SET allow_unsigned_extensions = true")
+conn = duckdb.connect(config={"allow_unsigned_extensions": "true"})
 conn.execute(f"LOAD '{extension_path()}'")
 
 registered = set(
