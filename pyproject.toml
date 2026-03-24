@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "blobtemplates"
-version = "0.2.3"
+version = "0.2.4"
 description = "Inja templating, JMESPath, JSON diff/patch, and YAML conversion as scalar SQL functions"
 requires-python = ">=3.8"
 license = {text = "MIT"}

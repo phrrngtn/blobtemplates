@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "blobtemplates-duckdb"
-version = "0.2.3"
+version = "0.2.4"
 description = "blobtemplates DuckDB extension — loadable via LOAD command"
 requires-python = ">=3.8"
 license = {text = "MIT"}
